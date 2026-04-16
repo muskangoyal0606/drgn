@@ -8,6 +8,7 @@
 #include "../linux_kernel.h"
 #include "../log.h"
 #include "../program.h"
+#include "../remote.h"
 #include "../string_builder.h"
 #include "../symbol.h"
 #include "../util.h"
@@ -341,6 +342,8 @@ static Program *Program_new_impl(const struct drgn_platform *platform)
 	prog->config = no_cleanup_ptr(config);
 	pyobjectp_set_init(&prog->objects);
 	drgn_program_init(&prog->prog, platform);
+
+	prog->remote_initialized = false;
 	if (Program_init_logging(prog))
 		return NULL;
 	return_ptr(prog);
@@ -1464,6 +1467,29 @@ static PyObject *Program_read(Program *self, PyObject *args, PyObject *kwds)
 					 &physical))
 	    return NULL;
 
+	if (!self->remote_initialized) {
+		PyObject *mode_obj = PyDict_GetItemString(self->config, "remote_mode");
+
+		if (mode_obj && PyUnicode_Check(mode_obj)) {
+			const char *mode = PyUnicode_AsUTF8(mode_obj);
+
+			fprintf(stderr, "[DEBUG] Lazy remote init (find_object): mode=%s\n", mode);
+
+			struct drgn_error *err;
+
+			if (strcmp(mode, "qmp") == 0) {
+				err = drgn_program_enable_remote_qmp(&self->prog);
+			} else {
+				err = drgn_program_enable_remote_gdb(&self->prog);
+			}
+
+			if (err)
+				return set_drgn_error(err);
+
+			self->remote_initialized = true;
+		}
+	}
+
 	if (size < 0) {
 		PyErr_SetString(PyExc_ValueError, "negative size");
 		return NULL;
@@ -1828,9 +1854,33 @@ static DrgnObject *Program_find_object(Program *self, PyObject *name_obj,
 	_cleanup_pydecref_ DrgnObject *ret = DrgnObject_alloc(self);
 	if (!ret)
 		return NULL;
+
+	if (!self->remote_initialized) {
+		PyObject *mode_obj = PyDict_GetItemString(self->config, "remote_mode");
+
+		if (mode_obj && PyUnicode_Check(mode_obj)) {
+			const char *mode = PyUnicode_AsUTF8(mode_obj);
+
+			fprintf(stderr, "[DEBUG] Lazy remote init: mode=%s\n", mode);
+
+			struct drgn_error *err;
+
+			if (strcmp(mode, "qmp") == 0) {
+				err = drgn_program_enable_remote_qmp(&self->prog);
+			} else {
+				err = drgn_program_enable_remote_gdb(&self->prog);
+			}
+
+			if (err)
+				return set_drgn_error(err);
+
+			self->remote_initialized = true;
+		}
+	}
+		
 	bool clear = set_drgn_in_python();
 	err = drgn_program_find_object(&self->prog, name, filename, flags,
-				       &ret->obj);
+				       &ret->obj);				   
 	if (clear)
 		clear_drgn_in_python();
 	if (err && err->code == DRGN_ERROR_LOOKUP)

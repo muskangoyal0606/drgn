@@ -442,6 +442,7 @@ def _load_debugging_symbols(prog: drgn.Program, args: argparse.Namespace) -> Non
 
 
 def _main() -> None:
+    import drgn
     _set_log_handler()
 
     version = version_header()
@@ -462,6 +463,11 @@ def _main() -> None:
         metavar="PID",
         type=int,
         help="debug the running process with the given PID",
+    )
+    program_group.add_argument(
+        "--remote",
+        choices=["gdb", "qmp"],
+        help="enable remote debugging with backend (gdb or qmp)",
     )
 
     symbol_group = parser.add_argument_group("debugging symbols")
@@ -646,14 +652,36 @@ def _main() -> None:
     else:
         logger.setLevel(args.log_level.upper())
 
-    platform = None
-    if args.architecture:
-        platform = drgn.Platform(drgn.Architecture[args.architecture.upper()])
-
     vmcoreinfo = None
     if args.vmcoreinfo is not None:
         with open(args.vmcoreinfo, "rb") as f:
             vmcoreinfo = f.read()
+
+    platform = None
+
+    if args.architecture:
+        platform = drgn.Platform(drgn.Architecture[args.architecture.upper()])
+
+    # remote mode → detect from vmlinux
+    elif args.remote and args.symbols:
+        import subprocess
+
+        def detect_arch_from_vmlinux(path):
+            out = subprocess.check_output(["readelf", "-h", path], text=True)
+
+            if "AArch64" in out:
+                return drgn.Architecture.AARCH64
+            elif "PowerPC64" in out:
+                return drgn.Architecture.PPC64
+            elif "x86-64" in out:
+                return drgn.Architecture.X86_64
+            else:
+                raise ValueError("Unknown architecture in vmlinux")
+
+        arch = detect_arch_from_vmlinux(args.symbols[0])
+        platform = drgn.Platform(arch)
+
+        print(f"[DEBUG] Detected architecture: {arch}")
 
     prog = drgn.Program(platform=platform, vmcoreinfo=vmcoreinfo)
     try:
@@ -666,6 +694,23 @@ def _main() -> None:
                 sys.exit(
                     f"{e}\nerror: attaching to live process requires ptrace attach permissions"
                 )
+        elif args.remote:
+            print("[DEBUG] Remote mode enabled")
+
+            # store backend mode
+            mode = args.remote
+            prog.config["remote_mode"] = mode
+
+            print(f"[DEBUG] Remote backend: {mode}")
+
+            if args.symbols:
+                module = prog.extra_module("kernel", create=True)
+
+                for sym_file in args.symbols:
+                    module.try_file(sym_file)
+
+                print(f"[DEBUG] Loaded symbols from: {module.loaded_file_path}")
+      
         else:
             _set_kernel_with_sudo_fallback(prog)
     except OSError as e:

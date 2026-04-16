@@ -212,6 +212,7 @@ typedef struct {
 	 * lifetime of the Program.
 	 */
 	struct pyobjectp_set objects;
+	bool remote_initialized;
 } Program;
 
 typedef struct {
